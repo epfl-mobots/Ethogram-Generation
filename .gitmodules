@@ -1,0 +1,3 @@
+[submodule "InfluxDBInterface"]
+	path = InfluxDBInterface
+	url = https://github.com/epfl-mobots/InfluxDBInterface.git
