@@ -10,18 +10,6 @@ def build_ethogram(w):
         E[w - 1, np.arange(len(w))] = 1
     return E, nregions
 
-def day_boundaries_from_df(df_sub):
-    ts = df_sub.index.get_level_values('timestamp')
-    dates = ts.date
-    change = np.flatnonzero(np.diff(dates.astype('datetime64[D]'))) + 1
-    boundaries = list(change) + [len(df_sub)]
-    names, counts, start = [], [], 0
-    for b in boundaries:
-        names.append(str(pd.to_datetime(dates[start]).date()))
-        counts.append(b - start)
-        start = b
-    return names, np.cumsum(counts).tolist(), counts
-
 def plot_ethogram(E, nregions, day_names, day_boundaries, nb_points_per_day, title):
     fig, ax = plt.subplots(figsize=(20, 6))
     ax.imshow(
@@ -50,7 +38,7 @@ def plot_ethogram(E, nregions, day_names, day_boundaries, nb_points_per_day, tit
     ax.set_title(title)
     plt.tight_layout()
     plt.show()
-    
+
 def get_source_vector(df):
     """Retourne un vecteur numpy des source_id aligné aux lignes de df,
        que source_id soit dans l'index ou en colonne."""
@@ -60,7 +48,7 @@ def get_source_vector(df):
         return df['source_id'].to_numpy()
     else:
         raise KeyError("Aucun 'source_id' trouvé (ni niveau d'index ni colonne).")
-
+    
 def get_time_index(df):
     """Retourne un DatetimeIndex aligné aux lignes de df, quel que soit l'index."""
     if isinstance(df.index, pd.MultiIndex):
