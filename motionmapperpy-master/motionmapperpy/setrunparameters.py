@@ -26,6 +26,12 @@ def setRunParameters(parameters=None):
     # %Whether to do wavelet decomposition, if False then use normalized projections for tSNE embedding.
     waveletDecomp = True
 
+    # %Multiplier used to detect gaps in the time series when splitting wavelet chunks.
+    waveletGapThresholdMultiplier = 1.5
+
+    # %Samples trimmed at each chunk edge after wavelet computation.
+    waveletEdgeTrimSamples = None
+
     # %number of wavelet frequencies to use
     numPeriods = 25
 
@@ -151,6 +157,12 @@ def setRunParameters(parameters=None):
 
     if not 'waveletDecomp' in parameters.keys():
         parameters.waveletDecomp = waveletDecomp
+
+    if not 'waveletGapThresholdMultiplier' in parameters.keys():
+        parameters.waveletGapThresholdMultiplier = waveletGapThresholdMultiplier
+
+    if not 'waveletEdgeTrimSamples' in parameters.keys():
+        parameters.waveletEdgeTrimSamples = waveletEdgeTrimSamples
 
     if not 'useGPU' in parameters.keys():
         parameters.useGPU = useGPU

@@ -203,17 +203,162 @@ def mm_findWavelets(projections, numModes, parameters):
                                  parameters.useGPU)
     return amplitudes, f
 
+
+def _normalize_optional_vector(vector, expected_length):
+    if vector is None:
+        return None
+
+    array = np.asarray(vector).squeeze()
+    if array.ndim == 0:
+        array = array.reshape(1)
+    if len(array) != expected_length:
+        raise ValueError('Metadata length does not match projections length.')
+    return array
+
+
+def _chunk_bounds_from_metadata(length, parameters, timestamps=None, chunk_ids=None):
+    breakpoints = set()
+
+    chunk_ids = _normalize_optional_vector(chunk_ids, length)
+    if chunk_ids is not None:
+        breakpoints.update((np.flatnonzero(chunk_ids[1:] != chunk_ids[:-1]) + 1).tolist())
+
+    timestamps = _normalize_optional_vector(timestamps, length)
+    if timestamps is not None:
+        ts = np.asarray(timestamps, dtype=float)
+        diffs = np.diff(ts)
+        finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if finite_diffs.size > 0:
+            expected_dt = np.median(finite_diffs)
+            gap_multiplier = getattr(parameters, 'waveletGapThresholdMultiplier', 1.5)
+            gap_threshold = expected_dt * gap_multiplier
+            breakpoints.update((np.flatnonzero(diffs > gap_threshold) + 1).tolist())
+
+    if not breakpoints:
+        return [(0, length)]
+
+    breakpoints = sorted(bp for bp in breakpoints if 0 < bp < length)
+    starts = [0] + breakpoints
+    ends = breakpoints + [length]
+    return list(zip(starts, ends))
+
+
+def _wavelet_edge_trim_samples(parameters):
+    custom_trim = getattr(parameters, 'waveletEdgeTrimSamples', None)
+    if custom_trim is not None:
+        return max(0, int(custom_trim))
+
+    samples_per_period = int(np.ceil((1.0 / parameters.minF) * parameters.samplingFreq))
+    return max(1, samples_per_period // 2)
+
+
+def mm_findWavelets_with_chunks(projections, numModes, parameters, timestamps=None, chunk_ids=None, return_report=True):
+    projections = np.asarray(projections)
+    length = projections.shape[0]
+    chunk_bounds = _chunk_bounds_from_metadata(length, parameters, timestamps=timestamps, chunk_ids=chunk_ids)
+
+    if len(chunk_bounds) == 1 and chunk_bounds[0] == (0, length):
+        amplitudes, f = findWavelets(projections, numModes, parameters.omega0, parameters.numPeriods,
+                                     parameters.samplingFreq, parameters.maxF, parameters.minF,
+                                     parameters.numProcessors, parameters.useGPU)
+        if hasattr(amplitudes, 'get'):
+            amplitudes = amplitudes.get()
+        kept_indices = np.arange(length, dtype=int)
+        report = {
+            'total_samples': int(length),
+            'kept_samples': int(len(kept_indices)),
+            'skipped_samples': 0,
+            'usable_fraction': 1.0,
+            'usable_percentage': 100.0,
+            'retained_chunks': 1,
+            'skipped_chunks': [],
+        }
+        if return_report:
+            return amplitudes, f, kept_indices, report
+        return amplitudes, f, kept_indices
+
+    retained_amplitudes = []
+    retained_indices = []
+    skipped_chunks = []
+    f = None
+    edge_trim = _wavelet_edge_trim_samples(parameters)
+
+    for start, end in chunk_bounds:
+        chunk = projections[start:end]
+        if len(chunk) <= 2 * edge_trim:
+            skipped_chunks.append((start, end, len(chunk)))
+            continue
+
+        chunk_amplitudes, f = findWavelets(chunk, numModes, parameters.omega0, parameters.numPeriods,
+                                           parameters.samplingFreq, parameters.maxF, parameters.minF,
+                                           parameters.numProcessors, parameters.useGPU)
+        if hasattr(chunk_amplitudes, 'get'):
+            chunk_amplitudes = chunk_amplitudes.get()
+
+        kept = slice(edge_trim, len(chunk) - edge_trim)
+        retained_amplitudes.append(chunk_amplitudes[kept])
+        retained_indices.append(np.arange(start, end, dtype=int)[kept])
+
+    if not retained_amplitudes:
+        report = {
+            'total_samples': int(length),
+            'kept_samples': 0,
+            'skipped_samples': int(length),
+            'usable_fraction': 0.0,
+            'usable_percentage': 0.0,
+            'retained_chunks': 0,
+            'skipped_chunks': skipped_chunks,
+        }
+        print(
+            f"Skipping all wavelet chunks: 0/{length} samples retained (0.00%). "
+            f"Edge trim={edge_trim}. Skipped chunks: {len(skipped_chunks)}"
+        )
+        if return_report:
+            return np.empty((0, numModes * parameters.numPeriods)), f, np.empty((0,), dtype=int), report
+        raise ValueError('No wavelet chunks were long enough after edge trimming.')
+
+    amplitudes = np.concatenate(retained_amplitudes, axis=0)
+    kept_indices = np.concatenate(retained_indices, axis=0)
+    report = {
+        'total_samples': int(length),
+        'kept_samples': int(len(kept_indices)),
+        'skipped_samples': int(length - len(kept_indices)),
+        'usable_fraction': float(len(kept_indices) / length) if length else 0.0,
+        'usable_percentage': float(100.0 * len(kept_indices) / length) if length else 0.0,
+        'retained_chunks': len(retained_amplitudes),
+        'skipped_chunks': skipped_chunks,
+    }
+    if skipped_chunks:
+        skipped_samples = sum(chunk_length for _, _, chunk_length in skipped_chunks)
+        print(
+            f"Wavelet chunk report: kept {len(kept_indices)}/{length} samples "
+            f"({report['usable_percentage']:.2f}%). "
+            f"Retained chunks: {len(retained_amplitudes)}, skipped chunks: {len(skipped_chunks)}, "
+            f"skipped samples: {skipped_samples}."
+        )
+    if return_report:
+        return amplitudes, f, kept_indices, report
+    return amplitudes, f, kept_indices
+
 def file_embeddingSubSampling(projectionFile, parameters):
     perplexity = parameters.training_perplexity
     numPoints = parameters.training_numPoints
 
     print('\t Loading Projections')
     try:
-        projections = np.array(loadmat(projectionFile, variable_names=['projections'])['projections'])
+        projection_mat = loadmat(projectionFile)
+        projections = np.array(projection_mat['projections'])
+        timestamps = projection_mat.get('timestamps')
+        chunk_ids = projection_mat.get('chunk_id')
     except:
         with h5py.File(projectionFile, 'r') as hfile:
             projections = hfile['projections'][:].T
+            timestamps = hfile['timestamps'][:] if 'timestamps' in hfile else None
+            chunk_ids = hfile['chunk_id'][:] if 'chunk_id' in hfile else None
         projections = np.array(projections)
+
+    timestamps = _normalize_optional_vector(timestamps, len(projections))
+    chunk_ids = _normalize_optional_vector(chunk_ids, len(projections))
 
     if projections.shape[0] < numPoints:
         raise ValueError('Training number of points for miniTSNE is greater than # samples in some files. Please '
@@ -230,15 +375,22 @@ def file_embeddingSubSampling(projectionFile, parameters):
 
     if parameters.waveletDecomp:
         print('\t Calculating Wavelets')
-        data, _ = mm_findWavelets(projections, numModes, parameters)
-        signalIdx = np.indices((data.shape[0],))[0]
+        data, _, signalIdx, report = mm_findWavelets_with_chunks(
+            projections,
+            numModes,
+            parameters,
+            timestamps=timestamps,
+            chunk_ids=chunk_ids,
+            return_report=True,
+        )
+        print(
+            f"\t Wavelet coverage: {report['kept_samples']}/{report['total_samples']} samples "
+            f"({report['usable_percentage']:.2f}%) retained after chunk trimming."
+        )
+        if len(signalIdx) == 0:
+            raise ValueError('No wavelet samples were retained after chunk trimming.')
         signalIdx = signalIdx[firstFrame:int(firstFrame + (numPoints) * skipLength): skipLength]
-        if parameters.useGPU >= 0:
-            data2 = data[signalIdx].copy()
-            signalData = data2.get()
-            del data, data2
-        else:
-            signalData = data[signalIdx]
+        signalData = data[signalIdx]
     else:
         print('Using projections for tSNE. No wavelet decomposition.')
         data = projections
@@ -583,7 +735,7 @@ def findTDistributedProjections_fmin(data, trainingData, trainingEmbedding, para
     return zValues,zCosts,zGuesses,inConvHull,meanMax,exitFlags
 
 
-def findEmbeddings(projections, trainingData, trainingEmbedding, parameters):
+def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, timestamps=None, chunk_ids=None):
     """
     findEmbeddings finds the optimal embedding of a data set into a previously
     found t-SNE embedding.
@@ -591,6 +743,8 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters):
     :param trainingData: Nt x (pcaModes x numPeriods) array of wavelet amplitudes containing Nt data points.
     :param trainingEmbedding: Nt x 2 array of embeddings.
     :param parameters: motionmapperpy Parameters dictionary.
+    :param timestamps: Optional timestamps used to split wavelet computation into contiguous chunks.
+    :param chunk_ids: Optional chunk labels used to split wavelet computation into contiguous chunks.
     :return: zValues : N x 2 array of embedding results, outputStatistics : dictionary containing other parametric
     outputs.
     """
@@ -600,12 +754,32 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters):
 
     if parameters.waveletDecomp:
         print('Finding Wavelets')
-        data, f = mm_findWavelets(projections, numModes, parameters)
-        if parameters.useGPU >= 0:
-            data = data.get()
+        data, f, keptIdx, report = mm_findWavelets_with_chunks(
+            projections,
+            numModes,
+            parameters,
+            timestamps=timestamps,
+            chunk_ids=chunk_ids
+        )
+        print(
+            f"Wavelet coverage: {report['kept_samples']}/{report['total_samples']} samples "
+            f"({report['usable_percentage']:.2f}%) retained after chunk trimming."
+        )
+        if len(keptIdx) == 0:
+            raise ValueError('No wavelet samples were retained after chunk trimming.')
     else:
         print('Using projections for tSNE. No wavelet decomposition.')
         f = 0
+        keptIdx = np.arange(len(projections), dtype=int)
+        report = {
+            'total_samples': int(len(projections)),
+            'kept_samples': int(len(projections)),
+            'skipped_samples': 0,
+            'usable_fraction': 1.0,
+            'usable_percentage': 100.0,
+            'retained_chunks': 1,
+            'skipped_chunks': [],
+        }
         data = projections
     data = data / np.sum(data, 1)[:, None]
 
@@ -623,6 +797,8 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters):
         outputStatistics.inConvHull = inConvHull
         outputStatistics.meanMax = meanMax
         outputStatistics.exitFlags = exitFlags
+        outputStatistics.keptIdx = keptIdx
+        outputStatistics.waveletCoverage = report
     elif parameters.method == 'UMAP':
         umapfolder = parameters['projectPath'] + '/UMAP/'
         print('\tLoading UMAP Model.')
@@ -638,6 +814,8 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters):
         outputStatistics = edict()
         outputStatistics.training_mean = trainparams[0]
         outputStatistics.training_scale = trainparams[1]
+        outputStatistics.keptIdx = keptIdx
+        outputStatistics.waveletCoverage = report
     else:
         raise ValueError('Supported parameter.method are \'TSNE\' or \'UMAP\'')
     del data
