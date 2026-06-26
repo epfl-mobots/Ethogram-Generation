@@ -4,6 +4,3 @@
 [submodule "HiveOpenings"]
 	path = HiveOpenings
 	url = https://github.com/epfl-mobots/HiveOpenings.git
-[submodule "RHCVisualisation"]
-	path = RHCVisualisation
-	url = https://github.com/epfl-mobots/RHCVisualisation.git
