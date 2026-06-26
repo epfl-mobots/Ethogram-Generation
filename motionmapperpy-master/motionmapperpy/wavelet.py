@@ -26,24 +26,21 @@ def findWavelets(projections, pcaModes, omega0, numPeriods, samplingFreq, maxF, 
 
     """
     t1 = time.time()
-    print('\t Calculating wavelets, clock starting.')
 
     if useGPU>=0:
         try:
-            import cupy as np
+            import cupy
         except ModuleNotFoundError as E:
             warnings.warn("Trying to use GPU but cupy is not installed. Install cupy or set parameters.useGPU = -1. "
                   "https://docs.cupy.dev/en/stable/install.html")
             raise E
 
-        np.cuda.Device(useGPU).use()
-        print('\t Using GPU #%i'%useGPU)
+        cupy.cuda.Device(useGPU).use()
     else:
         import numpy as np
         import multiprocessing as mp
         if numProcessors<0:
             numProcessors = mp.cpu_count()
-        print('\t Using #%i CPUs.' % numProcessors)
 
     projections = np.array(projections)
     t1 = time.time()
@@ -58,11 +55,11 @@ def findWavelets(projections, pcaModes, omega0, numPeriods, samplingFreq, maxF, 
     if useGPU>=0:
         amplitudes = np.zeros((numPeriods*pcaModes,N))
         for i in range(pcaModes):
-            amplitudes[i*numPeriods:(i+1)*numPeriods] = fastWavelet_morlet_convolution_parallel(i, projections[:, i], f, omega0, dt, useGPU)
+            amplitudes[i*numPeriods:(i+1)*numPeriods] = _fastWavelet_morlet_convolution_parallel(i, projections[:, i], f, omega0, dt, useGPU)
     else:
         try:
             pool = mp.Pool(numProcessors)
-            amplitudes = pool.starmap(fastWavelet_morlet_convolution_parallel,
+            amplitudes = pool.starmap(_fastWavelet_morlet_convolution_parallel,
                                       [(i, projections[:, i], f, omega0, dt, useGPU) for i in range(pcaModes)])
             amplitudes = np.concatenate(amplitudes, 0)
             pool.close()
@@ -71,14 +68,14 @@ def findWavelets(projections, pcaModes, omega0, numPeriods, samplingFreq, maxF, 
             pool.close()
             pool.join()
             raise E
-    print('\t Done at %0.02f seconds.'%(time.time()-t1))
+    #print('\t Done at %0.02f seconds.'%(time.time()-t1))
     return amplitudes.T, f
 
 
-def fastWavelet_morlet_convolution_parallel(modeno, x, f, omega0, dt, useGPU):
+def _fastWavelet_morlet_convolution_parallel(modeno, x, f, omega0, dt, useGPU):
     if useGPU>=0:
-        import cupy as np
-        np.cuda.Device(useGPU).use()
+        import cupy
+        cupy.cuda.Device(useGPU).use()
     else:
         import numpy as np
     N = len(x)

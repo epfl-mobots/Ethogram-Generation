@@ -348,12 +348,12 @@ def file_embeddingSubSampling(projectionFile, parameters):
     try:
         projection_mat = loadmat(projectionFile)
         projections = np.array(projection_mat['projections'])
-        timestamps = projection_mat.get('timestamps')
+        timestamps = projection_mat.get('real_timestamps')
         chunk_ids = projection_mat.get('chunk_id')
     except:
         with h5py.File(projectionFile, 'r') as hfile:
             projections = hfile['projections'][:].T
-            timestamps = hfile['timestamps'][:] if 'timestamps' in hfile else None
+            timestamps = hfile['real_timestamps'][:] if 'real_timestamps' in hfile else None
             chunk_ids = hfile['chunk_id'][:] if 'chunk_id' in hfile else None
         projections = np.array(projections)
 
@@ -389,13 +389,54 @@ def file_embeddingSubSampling(projectionFile, parameters):
         )
         if len(signalIdx) == 0:
             raise ValueError('No wavelet samples were retained after chunk trimming.')
-        signalIdx = signalIdx[firstFrame:int(firstFrame + (numPoints) * skipLength): skipLength]
-        signalData = data[signalIdx]
+        # 'signalIdx' returned from mm_findWavelets_with_chunks are original projection indices
+        # but 'data' contains only the retained wavelet rows in the same order. To index
+        # into 'data' we must use positions within the kept indices array rather than
+        # the original projection indices.
+        kept_indices = signalIdx
+        # build a mapping from original projection index -> row position in 'data'
+        pos_map = -np.ones((len(projections),), dtype=int)
+        pos_map[kept_indices] = np.arange(len(kept_indices), dtype=int)
+        # compute safe slice endpoint to avoid selecting beyond retained rows
+        end_pos = int(firstFrame + (numPoints) * skipLength)
+        end_pos = min(end_pos, data.shape[0])
+        if end_pos <= firstFrame:
+            raise ValueError('Computed sampling slice is empty (end_pos <= firstFrame).')
+        # sample positions within the retained-wavelet rows directly (safer)
+        pos_positions = np.arange(data.shape[0], dtype=int)[firstFrame:end_pos: skipLength]
+        selected_orig = kept_indices[pos_positions]
+        posIdx = pos_positions
+        # clip positions to data length just in case
+        pos_mask = (posIdx >= 0) & (posIdx < data.shape[0])
+        if not np.all(pos_mask):
+            bad_orig = selected_orig[~pos_mask]
+            print(f'Warning: {bad_orig.size} selected original indices map outside retained wavelet rows. Dropping them: {bad_orig[:10]}')
+        posIdx = posIdx[pos_mask]
+        if posIdx.size == 0:
+            raise ValueError('No valid signal indices remain after alignment and bounds-checking.')
+        # also provide signalIdx as the original projection indices for downstream use
+        # diagnostic info 
+        signalIdx = selected_orig
+        print(f'DEBUG wavelet: N={len(projections)}, kept={len(kept_indices)}, data_rows={data.shape[0]}, '
+            f'firstFrame={firstFrame}, skipLength={skipLength}, numPoints={numPoints}, end_pos={end_pos}, '
+            f'selected={len(selected_orig)}, kept_selected={len(signalIdx)}')
+        if posIdx.size:
+            print(f'DEBUG pos_positions range: min={int(posIdx.min())}, max={int(posIdx.max())}')
+        signalData = data[posIdx]
     else:
         print('Using projections for tSNE. No wavelet decomposition.')
         data = projections
         signalIdx = np.indices((data.shape[0],))[0]
-        signalIdx = signalIdx[firstFrame:int(firstFrame + (numPoints) * skipLength): skipLength]
+        end_pos = int(firstFrame + (numPoints) * skipLength)
+        end_pos = min(end_pos, data.shape[0])
+        if end_pos <= firstFrame:
+            raise ValueError('Computed sampling slice is empty (end_pos <= firstFrame).')
+        signalIdx = signalIdx[firstFrame:end_pos: skipLength]
+        # signalIdx here are simple integer positions into 'data'
+        signalIdx = signalIdx[(signalIdx >= 0) & (signalIdx < data.shape[0])]
+        if signalIdx.size == 0:
+            raise ValueError('No valid signal indices remain after alignment and bounds-checking.')
+        print(f'DEBUG projections-branch: data_rows={data.shape[0]}, firstFrame={firstFrame}, skipLength={skipLength}, numPoints={numPoints}, selected={len(signalIdx)}')
         signalData = data[signalIdx]
 
     signalAmps = np.sum(signalData, axis=1)
@@ -466,10 +507,11 @@ def runEmbeddingSubSampling(projectionDirectory, parameters):
 
     return trainingSetData,trainingSetAmps,projectionFiles
 
-def subsampled_tsne_from_projections(parameters,results_directory):
+def subsampled_tsne_from_projections(parameters):
     """
     Wrapper function for training set subsampling and mapping.
     """
+    results_directory = parameters.projectPath
     projection_directory = results_directory+'/Projections/'
     if parameters.method == 'TSNE':
         if parameters.waveletDecomp:
@@ -495,7 +537,7 @@ def subsampled_tsne_from_projections(parameters,results_directory):
 
     print('Finding Training Set')
     if not os.path.exists(tsne_directory+'training_data.mat'):
-        trainingSetData,trainingSetAmps,_ = runEmbeddingSubSampling(projection_directory,parameters)
+        trainingSetData,trainingSetAmps,_ = runEmbeddingSubSampling(projection_directory, parameters)
         if os.path.exists(tsne_directory):
             shutil.rmtree(tsne_directory)
             os.mkdir(tsne_directory)

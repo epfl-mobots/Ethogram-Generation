@@ -1,11 +1,9 @@
 """Helpers for generating videos that pair a hive dataset view with a UMAP density map."""
 
-import os
-import glob
+import os, pickle, glob, subprocess, hdf5storage
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import hdf5storage
 import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,14 +23,72 @@ DEFAULT_EXCLUDE_COLUMNS = {
     "UMAP_1",
 }
 
+def _normalize_optional_vector(vector):
+    if vector is None:
+        return None
+    array = np.asarray(vector).squeeze()
+    if array.ndim == 0:
+        array = array.reshape(1)
+    return array
 
-def _as_points(values: Sequence[Sequence[float]]) -> np.ndarray:
-    array = np.asarray(values, dtype=float)
-    if array.ndim == 1 and array.size == 2:
-        return array.reshape(1, 2)
-    if array.ndim == 2 and array.shape[1] == 2:
-        return array
-    raise ValueError("Expected an array of 2D points")
+def advance_umap_state(timeline: pd.DataFrame, cursor: int, current_point, current_timestamp, video_timestamp):
+    timestamp_column = "real_timestamps"
+    while cursor < len(timeline) and pd.Timestamp(timeline.loc[cursor, timestamp_column]) <= pd.Timestamp(video_timestamp):
+        current_row = timeline.iloc[cursor]
+        current_point = np.array([current_row["umap_x"], current_row["umap_y"]], dtype=float)
+        current_timestamp = current_row[timestamp_column]
+        cursor += 1
+    return cursor, current_point, current_timestamp
+
+def load_projection_timeline(dataset_cfg: Dict, projections_dir: Path, dataset_name: str) -> pd.DataFrame:
+    '''
+    Loads the projection timeline for a given dataset name.
+    The timestamps correspond to UMAP data datetimes and include the datetimes that are not in the coordinates. 
+    '''
+    dataset_config = dataset_cfg[dataset_name]
+    projection_source_id = dataset_config.get("projection_source_id")
+    projection_file = projections_dir / "observation_OH_pcaModes.mat"
+    if not projection_file.exists():
+        raise FileNotFoundError(f"No projection metadata file found at {projection_file}")
+    projection_payload = hdf5storage.loadmat(str(projection_file))
+    timestamps = _normalize_optional_vector(projection_payload.get("real_timestamps"))
+    if timestamps is None:
+        raise ValueError("Projection metadata must contain 'real_timestamp' for canonical timeline")
+
+    source_ids = _normalize_optional_vector(projection_payload.get("source_id"))
+    if timestamps is None:
+        raise ValueError("Projection metadata does not contain timestamps")
+    timeline = pd.DataFrame({
+        "real_timestamps": pd.to_datetime(np.asarray(timestamps).squeeze(), utc=True),
+    })
+    if source_ids is not None:
+        timeline["projection_source_id"] = pd.to_numeric(np.asarray(source_ids).squeeze(), errors="coerce").astype("Int64")
+    if projection_source_id is not None and "projection_source_id" in timeline.columns:
+        timeline = timeline[timeline["projection_source_id"] == projection_source_id].copy()
+    timeline = timeline.sort_values("real_timestamps").reset_index(drop=True)
+    return timeline
+
+def load_umap_data(dataset_cfg: Dict, projections_dir: Path, dataset_name: str) -> pd.DataFrame:
+    projection_source_id = dataset_cfg[dataset_name].get("projection_source_id")
+
+    metadata = load_umap_projection_metadata(projections_dir)
+    umap_coords = metadata.get("coordinates")
+    all_data_ts = metadata.get("real_timestamps")
+    all_data_source_ids = metadata.get("source_id")
+    kept_idx = metadata.get("keptIdx")
+
+    umap_df = pd.DataFrame({"umap_x": umap_coords[:, 0], "umap_y": umap_coords[:, 1]})
+    umap_df["real_timestamps"] = all_data_ts[kept_idx]
+    umap_df["source_id"] = all_data_source_ids[kept_idx]
+    umap_df["source_id"] = pd.to_numeric(all_data_source_ids[kept_idx], errors="coerce").astype("Int64")
+
+    # Keep only rows where the source_id matches the projection_source_id
+    umap_df = umap_df[umap_df["source_id"] == projection_source_id]
+
+    umap_df.sort_values("real_timestamps", inplace=True)
+    umap_df.reset_index(drop=True, inplace=True)
+
+    return umap_df
 
 
 def _normalize_wbounds(raw_bounds) -> List[np.ndarray]:
@@ -183,15 +239,37 @@ def load_umap_points_from_projection_file(projection_file: str) -> np.ndarray:
     raise ValueError("Projection file does not contain zValues or uVals")
 
 
-def load_umap_points_for_source(wshed_path: str, source_label: str) -> np.ndarray:
-    project_dir = Path(wshed_path).resolve().parent.parent
-    projection_dir = project_dir / "Projections"
-    candidates = sorted(glob.glob(str(projection_dir / f"*{source_label}*pcaModes_uVals.mat")))
-    if not candidates:
-        candidates = sorted(glob.glob(str(projection_dir / "*pcaModes_uVals.mat")))
-    if not candidates:
-        raise FileNotFoundError(f"No saved UMAP projection file found in {projection_dir}")
-    return load_umap_points_from_projection_file(candidates[0])
+def load_umap_points(projections_dir: Path) -> np.ndarray:
+    return load_umap_projection_metadata(projections_dir)["coordinates"]
+
+
+def load_umap_projection_metadata(projections_dir: Path) -> Dict[str, object]:
+    candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_uVals.mat")))
+    projection = hdf5storage.loadmat(candidates[0])
+    if "zValues" in projection:
+        coordinates = np.asarray(projection["zValues"], dtype=float)
+    elif "uVals" in projection:
+        coordinates = np.asarray(projection["uVals"], dtype=float)
+    else:
+        raise ValueError("Projection file does not contain zValues or uVals")
+    metadata: Dict[str, object] = {"coordinates": coordinates, "path": candidates[0]}
+
+    output_statistics_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_uVals_outputStatistics.pkl")))
+    if not output_statistics_candidates:
+        output_statistics_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_zVals_outputStatistics.pkl")))
+    with open(output_statistics_candidates[0], "rb") as hfile:
+        output_statistics = pickle.load(hfile)
+    metadata["keptIdx"] = output_statistics["keptIdx"]
+
+    pcamodes_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes.mat")))
+    pcamodes = hdf5storage.loadmat(pcamodes_candidates[0])
+    for key in ("real_timestamps", "source_id"):
+        metadata[key] = np.asarray(pcamodes[key]).squeeze()
+
+    # Change dtype of real_timestamps to datetime64[ns] with UTC timezone
+    metadata["real_timestamps"] = pd.to_datetime(metadata["real_timestamps"], utc=True)
+
+    return metadata
 
 
 def build_barycenters(df: pd.DataFrame, region_col: str = "region", umap_col: str = "UMAP") -> Dict[int, np.ndarray]:
@@ -359,7 +437,7 @@ def generate_dataset_umap_video(
                 source_label = str(frame_df[source_col].iloc[0])
             else:
                 source_label = str(video_name)
-        points = load_umap_points_for_source(wshed_path, str(source_label))
+        points = load_umap_points(Path(wshed_path).resolve().parent.parent / "Projections")
     if value_columns is None:
         value_columns = infer_value_columns(frame_df)
     if not value_columns:
@@ -369,7 +447,7 @@ def generate_dataset_umap_video(
 
     frames = []
     for index, (_, row) in enumerate(frame_df.iterrows()):
-        timestamp = row[timestamp_col] if timestamp_col in frame_df.columns else index
+        timestamp = row[timestamp_col]
         region = row[region_col] if region_col in frame_df.columns else None
         snapshot_title = title or (str(source_label) if source_label is not None else "Dataset snapshot")
         left_panel = render_snapshot_panel(
@@ -427,3 +505,20 @@ def generate_videos_for_sources(
             **kwargs,
         )
     return outputs
+
+def resolve_macos_alias(path: str) -> Path:
+    source_path = Path(path)
+    if source_path.is_symlink():
+        return source_path.resolve()
+    apple_script = (
+        'set a to POSIX file "{}" as alias\n'
+        'tell application "Finder" to set b to original item of a\n'
+        'return POSIX path of (b as alias)'
+    ).format(str(source_path).replace('"', '\\"'))
+    try:
+        resolved = subprocess.check_output(["osascript", "-e", apple_script], universal_newlines=True).strip()
+        if resolved:
+            return Path(resolved)
+    except Exception:
+        pass
+    return source_path
