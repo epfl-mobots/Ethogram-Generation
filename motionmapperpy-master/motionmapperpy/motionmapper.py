@@ -218,7 +218,6 @@ def _normalize_optional_vector(vector, expected_length):
 
 def _chunk_bounds_from_metadata(length, parameters, timestamps=None, chunk_ids=None):
     breakpoints = set()
-
     chunk_ids = _normalize_optional_vector(chunk_ids, length)
     if chunk_ids is not None:
         breakpoints.update((np.flatnonzero(chunk_ids[1:] != chunk_ids[:-1]) + 1).tolist())
@@ -230,7 +229,7 @@ def _chunk_bounds_from_metadata(length, parameters, timestamps=None, chunk_ids=N
         finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
         if finite_diffs.size > 0:
             expected_dt = np.median(finite_diffs)
-            gap_multiplier = getattr(parameters, 'waveletGapThresholdMultiplier', 1.5)
+            gap_multiplier = getattr(parameters, 'waveletGapThresholdMultiplier')
             gap_threshold = expected_dt * gap_multiplier
             breakpoints.update((np.flatnonzero(diffs > gap_threshold) + 1).tolist())
 
@@ -282,10 +281,11 @@ def mm_findWavelets_with_chunks(projections, numModes, parameters, timestamps=No
     skipped_chunks = []
     f = None
     edge_trim = _wavelet_edge_trim_samples(parameters)
+    min_chunk_len = parameters.samplingFreq/parameters.minF # minimum chunk length in samples
 
     for start, end in chunk_bounds:
         chunk = projections[start:end]
-        if len(chunk) <= 2 * edge_trim:
+        if len(chunk) <= 2 * edge_trim or len(chunk) < min_chunk_len:
             skipped_chunks.append((start, end, len(chunk)))
             continue
 
@@ -349,16 +349,13 @@ def file_embeddingSubSampling(projectionFile, parameters):
         projection_mat = loadmat(projectionFile)
         projections = np.array(projection_mat['projections'])
         timestamps = projection_mat.get('real_timestamps')
-        chunk_ids = projection_mat.get('chunk_id')
     except:
         with h5py.File(projectionFile, 'r') as hfile:
             projections = hfile['projections'][:].T
             timestamps = hfile['real_timestamps'][:] if 'real_timestamps' in hfile else None
-            chunk_ids = hfile['chunk_id'][:] if 'chunk_id' in hfile else None
         projections = np.array(projections)
 
     timestamps = _normalize_optional_vector(timestamps, len(projections))
-    chunk_ids = _normalize_optional_vector(chunk_ids, len(projections))
 
     if projections.shape[0] < numPoints:
         raise ValueError('Training number of points for miniTSNE is greater than # samples in some files. Please '
@@ -380,7 +377,6 @@ def file_embeddingSubSampling(projectionFile, parameters):
             numModes,
             parameters,
             timestamps=timestamps,
-            chunk_ids=chunk_ids,
             return_report=True,
         )
         print(
@@ -450,7 +446,7 @@ def file_embeddingSubSampling(projectionFile, parameters):
         yData = run_UMAP(signalData, parameters, save_model=False)
     else:
         raise ValueError('Supported parameter.method are \'TSNE\' or \'UMAP\'')
-    return yData,signalData,signalIdx,signalAmps
+    return yData, signalData, signalIdx, signalAmps
 
 def runEmbeddingSubSampling(projectionDirectory, parameters):
     """
@@ -470,6 +466,7 @@ def runEmbeddingSubSampling(projectionDirectory, parameters):
     
     N = parameters.trainingSetSize
     L = len(projectionFiles)
+    assert L > 0, "No projection files found in directory: %s" % projectionDirectory
     numPerDataSet = round(N / L)
     numModes = parameters.pcaModes
     numPeriods = parameters.numPeriods
@@ -505,7 +502,7 @@ def runEmbeddingSubSampling(projectionDirectory, parameters):
     trainingSetData = trainingSetData[useIdx,:]
     trainingSetAmps = trainingSetAmps[useIdx]
 
-    return trainingSetData,trainingSetAmps,projectionFiles
+    return trainingSetData, trainingSetAmps, projectionFiles
 
 def subsampled_tsne_from_projections(parameters):
     """
@@ -537,7 +534,7 @@ def subsampled_tsne_from_projections(parameters):
 
     print('Finding Training Set')
     if not os.path.exists(tsne_directory+'training_data.mat'):
-        trainingSetData,trainingSetAmps,_ = runEmbeddingSubSampling(projection_directory, parameters)
+        trainingSetData, trainingSetAmps,_ = runEmbeddingSubSampling(projection_directory, parameters)
         if os.path.exists(tsne_directory):
             shutil.rmtree(tsne_directory)
             os.mkdir(tsne_directory)
