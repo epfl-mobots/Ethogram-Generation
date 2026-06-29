@@ -70,20 +70,15 @@ def load_projection_timeline(dataset_cfg: Dict, projections_dir: Path, dataset_n
 
 def load_umap_data(dataset_cfg: Dict, projections_dir: Path, dataset_name: str) -> pd.DataFrame:
     projection_source_id = dataset_cfg[dataset_name].get("projection_source_id")
+    print(f"Loading UMAP data for dataset '{dataset_name}' with projection_source_id={projection_source_id} from {projections_dir}")
+    metadata = load_umap_projection_metadata(projections_dir, projection_source_id)
 
-    metadata = load_umap_projection_metadata(projections_dir)
     umap_coords = metadata.get("coordinates")
     all_data_ts = metadata.get("real_timestamps")
-    all_data_source_ids = metadata.get("source_id")
+    # Print out the unique value counts of all_data_source_ids
     kept_idx = metadata.get("keptIdx")
-
     umap_df = pd.DataFrame({"umap_x": umap_coords[:, 0], "umap_y": umap_coords[:, 1]})
     umap_df["real_timestamps"] = all_data_ts[kept_idx]
-    umap_df["source_id"] = all_data_source_ids[kept_idx]
-    umap_df["source_id"] = pd.to_numeric(all_data_source_ids[kept_idx], errors="coerce").astype("Int64")
-
-    # Keep only rows where the source_id matches the projection_source_id
-    umap_df = umap_df[umap_df["source_id"] == projection_source_id]
 
     umap_df.sort_values("real_timestamps", inplace=True)
     umap_df.reset_index(drop=True, inplace=True)
@@ -239,32 +234,35 @@ def load_umap_points_from_projection_file(projection_file: str) -> np.ndarray:
     raise ValueError("Projection file does not contain zValues or uVals")
 
 
-def load_umap_points(projections_dir: Path) -> np.ndarray:
-    return load_umap_projection_metadata(projections_dir)["coordinates"]
+def load_umap_points(watershed_path: Path) -> np.ndarray:
+    wshedfile = hdf5storage.loadmat(str(watershed_path))
+    return wshedfile['zValues']
 
 
-def load_umap_projection_metadata(projections_dir: Path) -> Dict[str, object]:
-    candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_uVals.mat")))
-    projection = hdf5storage.loadmat(candidates[0])
+def load_umap_projection_metadata(projections_dir: Path, dataset_id: int) -> Dict[str, object]:
+    candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals.mat")))[0]
+    pcamodes_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes.mat")))[0]
+    output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals_outputStatistics.pkl")))
+    if not output_statistics_candidate:
+        output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_zVals_outputStatistics.pkl")))
+    output_statistics_candidate = output_statistics_candidate[0]
+
+    projection = hdf5storage.loadmat(candidate)
     if "zValues" in projection:
         coordinates = np.asarray(projection["zValues"], dtype=float)
     elif "uVals" in projection:
         coordinates = np.asarray(projection["uVals"], dtype=float)
     else:
         raise ValueError("Projection file does not contain zValues or uVals")
-    metadata: Dict[str, object] = {"coordinates": coordinates, "path": candidates[0]}
 
-    output_statistics_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_uVals_outputStatistics.pkl")))
-    if not output_statistics_candidates:
-        output_statistics_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes_zVals_outputStatistics.pkl")))
-    with open(output_statistics_candidates[0], "rb") as hfile:
+    metadata: Dict[str, object] = {"coordinates": coordinates}
+
+    with open(output_statistics_candidate, "rb") as hfile:
         output_statistics = pickle.load(hfile)
     metadata["keptIdx"] = output_statistics["keptIdx"]
 
-    pcamodes_candidates = sorted(glob.glob(str(projections_dir / f"*pcaModes.mat")))
-    pcamodes = hdf5storage.loadmat(pcamodes_candidates[0])
-    for key in ("real_timestamps", "source_id"):
-        metadata[key] = np.asarray(pcamodes[key]).squeeze()
+    pcamode = hdf5storage.loadmat(pcamodes_candidate)
+    metadata["real_timestamps"] = np.asarray(pcamode["real_timestamps"]).squeeze()
 
     # Change dtype of real_timestamps to datetime64[ns] with UTC timezone
     metadata["real_timestamps"] = pd.to_datetime(metadata["real_timestamps"], utc=True)
@@ -437,7 +435,7 @@ def generate_dataset_umap_video(
                 source_label = str(frame_df[source_col].iloc[0])
             else:
                 source_label = str(video_name)
-        points = load_umap_points(Path(wshed_path).resolve().parent.parent / "Projections")
+        points = load_umap_points(Path(wshed_path))
     if value_columns is None:
         value_columns = infer_value_columns(frame_df)
     if not value_columns:
@@ -522,3 +520,27 @@ def resolve_macos_alias(path: str) -> Path:
     except Exception:
         pass
     return source_path
+
+def blackout_unused_hive_half(dataset_frame: np.ndarray, ihl: str) -> np.ndarray:
+    frame = np.asarray(dataset_frame).copy()
+    if frame.ndim != 3 or frame.shape[0] < 2 or frame.shape[1] < 2:
+        return frame
+
+    original = frame.copy()
+    height = frame.shape[0]
+    width = frame.shape[1]
+    midpoint = height // 2
+
+    if ihl == "upper":
+        frame[midpoint:, :, :] = 0
+        ambient_x0 = int(width * (2700 / 3840))
+        ambient_y0 = int(height * (2050 / 2160))
+        frame[ambient_y0:height, ambient_x0:width, :] = original[ambient_y0:height, ambient_x0:width, :]
+    elif ihl == "lower":
+        frame[:midpoint, :, :] = 0
+        timestamp_x0 = int(width * (1500 / 3840))
+        timestamp_y0 = int(height * (980 / 2160))
+        timestamp_x1 = int(width * (2350 / 3840))
+        timestamp_y1 = int(height * (1165 / 2160))
+        frame[timestamp_y0:timestamp_y1, timestamp_x0:timestamp_x1, :] = original[timestamp_y0:timestamp_y1, timestamp_x0:timestamp_x1, :]
+    return frame
