@@ -1,9 +1,3 @@
-[submodule "InfluxDBInterface"]
-	path = InfluxDBInterface
-	url = https://github.com/epfl-mobots/InfluxDBInterface.git
-[submodule "HiveOpenings"]
-	path = HiveOpenings
-	url = https://github.com/epfl-mobots/HiveOpenings.git
 [submodule "RHCThermalPlots"]
 	path = RHCThermalPlots
 	url = https://github.com/epfl-mobots/RHCThermalPlots.git
