@@ -1,8 +1,42 @@
 import numpy as np
+import pandas as pd
+from typing import Union
+from tqdm import tqdm
 from scipy.fftpack import dctn
 from RHCThermalPlots.thermalframe import ThermalFrame
 
-def extract_thermal_dct_features(thermal_field: np.ndarray) -> np.ndarray:
+def extract_thermal_dct_features(thermal_data: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+    """
+    Extract 8 spatial features from a thermal field using 2D DCT.
+    
+    Features:
+    1. DC component (mean temperature)
+    2. Low-frequency energy (top-left 2x2 block excluding DC)
+    3. Horizontal gradient energy
+    4. Vertical gradient energy
+    5. Diagonal energy
+    6. High-frequency energy
+    7. Spectral centroid (frequency-weighted energy)
+    8. Spatial variance proxy
+    """
+
+    if isinstance(thermal_data, np.ndarray):
+        return _extract_thermal_dct_features(thermal_data)
+
+    assert len(thermal_data.columns) == ThermalFrame.n_sensors, \
+        f"Input thermal data must have {ThermalFrame.grid.shape[1] * ThermalFrame.grid.shape[2]} columns corresponding to the thermal field shape {ThermalFrame.grid.shape}."
+    
+    features_list = []
+    # Build the ThermalFrame from the DataFrame
+    for index, row in tqdm(thermal_data.iterrows(), total=len(thermal_data), desc="Extracting DCT features"):
+        _tf = ThermalFrame(row.to_numpy(), ts=index)
+        _tf.calculate_thermal_field()
+        features = extract_thermal_dct_features(_tf.thermal_field)
+        features_list.append(features)
+    
+    return np.array(features_list)
+
+def _extract_thermal_dct_features(thermal_field: np.ndarray) -> np.ndarray:
     """
     Extract 8 spatial features from a thermal field using 2D DCT.
     
