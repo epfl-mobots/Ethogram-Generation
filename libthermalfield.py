@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.fftpack import dctn
+from RHCThermalPlots.thermalframe import ThermalFrame
 
 def extract_thermal_dct_features(thermal_field: np.ndarray) -> np.ndarray:
     """
@@ -15,6 +16,9 @@ def extract_thermal_dct_features(thermal_field: np.ndarray) -> np.ndarray:
     7. Spectral centroid (frequency-weighted energy)
     8. Spatial variance proxy
     """
+    assert thermal_field.ndim == 2, "Input thermal field must be a 2D array."
+    assert thermal_field.shape == (ThermalFrame.grid.shape[2], ThermalFrame.grid.shape[1]), \
+        f"Input thermal field must have shape {ThermalFrame.grid.shape}."
 
     x = np.asarray(thermal_field, dtype=float)
 
