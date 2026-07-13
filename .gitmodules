@@ -1,3 +1,6 @@
 [submodule "RHCThermalPlots"]
 	path = RHCThermalPlots
 	url = https://github.com/epfl-mobots/RHCThermalPlots.git
+[submodule "VisualActivity"]
+	path = VisualActivity
+	url = https://github.com/epfl-mobots/ObsHive-VisualActivity.git
