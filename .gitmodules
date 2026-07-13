@@ -1,0 +1,3 @@
+[submodule "VisualActivity"]
+	path = VisualActivity
+	url = https://github.com/epfl-mobots/ObsHive-VisualActivity.git
