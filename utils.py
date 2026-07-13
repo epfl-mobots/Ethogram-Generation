@@ -2,6 +2,52 @@ import numpy as np
 import motionmapperpy as mmpy
 import matplotlib.pyplot as plt
 import pandas as pd
+from VisualActivity.RHCVisualisation.RHCThermalPlots.InfluxDBInterface.libdb import download_tmp_DB, download_data_DB, download_co2_DB
+from VisualActivity.RHCVisualisation.RHCThermalPlots.thermalutil import extractAmbientTemp
+
+
+def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp, end_ts:pd.Timestamp, only_amb_T:bool=False, visualActivity:bool=False)-> pd.DataFrame:
+    """
+    Download the dataset for a given hive number and in-hive location.
+    """
+    assert ihl in ["upper", "lower"], "inhive_loc must be either 'upper' or 'lower'"
+    assert hive_nb in [1, 2], "hive_num must be either 1 or 2"
+    filters = {
+        "hive_num" : hive_nb,
+        "inhive_loc" : ihl,
+    }
+    df = download_tmp_DB('ObsHiveABC', start_ts, end_ts, resolution=resolution, filters=filters, aggr="last")
+    if only_amb_T:
+        df = extractAmbientTemp(df)
+        # Convert pd.Series to pd.Dataframe
+        df = df.to_frame(name="Tamb")
+    
+    # remove "inhive_loc" key from filters
+    filters.pop("inhive_loc")
+    co2_data = download_co2_DB('ObsHiveABC', start_ts, end_ts, resolution = resolution, filters = filters)
+    # Keep only the columns that start with the same letter as the first letter of ihl (i.e. "u" for "upper" and "l" for "lower")
+    co2_data = co2_data.loc[:, co2_data.columns.str.startswith(ihl[0])]
+    for col in co2_data.columns:
+        col_name = f"co2_{col[-1].upper()}"
+        df[col_name] = co2_data.loc[:,col] # This should add 2 columns: (ul and ur) OR (ll and lr)
+    
+    # Add a _field tag and _measurement tag to filters
+    filters["field"] = ["rel_humid"]
+    filters["measurement"] = ["co2", "rht"]
+    filters["inhive_loc"] = ihl
+    humid_data = download_data_DB('ObsHiveABC', start_ts, end_ts, resolution=resolution, filters=filters)
+    
+    # For every ts in df, there are several ts in humid_data. We want to take the average of the values in humid_data for each ts in df_resampled and store it in the "rel_humid" column of df_resampled.
+    df["rel_humid"] = df.index.to_series().apply(lambda ts: humid_data.loc[humid_data.index == ts, "_value"].mean())
+    
+    # Filter out timestamps not allowed by HiveOpenings
+    from VisualActivity.RHCVisualisation.RHCThermalPlots.RHCImaging.HiveOpenings.libOpenings import filter_timestamps
+    print("Before filtering with HiveOpenings:", len(df), "lines")
+    filtered_ts = filter_timestamps(df.index.to_list(), hive_nb=hive_nb, recovery_time=240)
+    df_resampled = df[df.index.isin(filtered_ts)]
+    print("After  :", len(df_resampled), "lines")
+    
+    return df_resampled
 
 def build_ethogram(w):
     """Build ethogram matrix from watershed region vector `w`.
