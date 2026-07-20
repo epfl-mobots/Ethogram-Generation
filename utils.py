@@ -73,7 +73,6 @@ def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp
         invalid_ts = imgs_paths[imgs_paths['valid'] == False]
         if not invalid_ts.empty:
             print(f"{len(invalid_ts)} invalid timestamp(s) found out of {len(imgs_paths)} total timestamps.")
-            print(invalid_ts[['valid']])
 
         # computeRpiActivities() only compares consecutive rows and doesn't care about validity
         # itself, so dropping ALL invalid timestamps would end up pairing up rows that aren't
