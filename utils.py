@@ -3,10 +3,10 @@ import motionmapperpy as mmpy
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
-from VisualActivity.RHCVisualisation.RHCThermalPlots.InfluxDBInterface.libdb import download_tmp_DB, download_data_DB, download_co2_DB
-from VisualActivity.RHCVisualisation.RHCThermalPlots.thermalutil import extractAmbientTemp
-from VisualActivity.RHCVisualisation.RHCImaging.libimage import fetchImagesPaths
-from VisualActivity.libActivity import computeRpiActivities
+from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.InfluxDBInterface.libdb import download_tmp_DB, download_data_DB, download_co2_DB
+from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.thermalutil import extractAmbientTemp
+from Metabolism.VisualActivity.RHCVisualisation.RHCImaging.libimage import fetchImagesPaths
+from Metabolism.VisualActivity.libActivity import computeRpiActivities
 
 
 def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp, end_ts:pd.Timestamp, only_amb_T:bool=False, visualActivityPath:str=None, verbose:bool=False)-> pd.DataFrame:
@@ -109,7 +109,7 @@ def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp
 
     
     # Filter out timestamps not allowed by HiveOpenings
-    from VisualActivity.RHCVisualisation.RHCThermalPlots.RHCImaging.HiveOpenings.libOpenings import filter_timestamps
+    from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.RHCImaging.HiveOpenings.libOpenings import filter_timestamps
     print("Before filtering with HiveOpenings:", len(df), "lines")
     filtered_ts = filter_timestamps(df.index.to_list(), hive_nb=hive_nb, recovery_time=recovery_time)
     df_resampled = df[df.index.isin(filtered_ts)]
