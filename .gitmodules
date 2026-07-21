@@ -1,0 +1,3 @@
+[submodule "Metabolism"]
+	path = Metabolism
+	url = https://github.com/epfl-mobots/Metabolism.git
