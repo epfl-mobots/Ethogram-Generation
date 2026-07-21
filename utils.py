@@ -9,7 +9,7 @@ from Metabolism.VisualActivity.RHCVisualisation.RHCImaging.libimage import fetch
 from Metabolism.VisualActivity.libActivity import computeRpiActivities
 
 
-def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp, end_ts:pd.Timestamp, only_amb_T:bool=False, visualActivityPath:str=None, verbose:bool=False)-> pd.DataFrame:
+def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp, end_ts:pd.Timestamp, only_amb_T:bool=False, visualActivityPath:str=None, bucket:str="ObsHiveABC", verbose:bool=False)-> pd.DataFrame:
     """
     Download the dataset for a given hive number and in-hive location.
 
@@ -21,6 +21,7 @@ def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp
     - end_ts (pd.Timestamp): End timestamp for the data.
     - only_amb_T (bool): If True, only return ambient temperature data.
     - visualActivityPath (str): Path to visual activity data. Will not be used if None.
+    - bucket (str): InfluxDB bucket to download the data from (e.g. "ObsHiveABC", "winter_exp", "a_sensing"). See MetabolicExp.buckets_by_type.
     - verbose (bool): If True, print verbose output.
     """
     assert ihl in ["upper", "lower"], "inhive_loc must be either 'upper' or 'lower'"
@@ -29,26 +30,26 @@ def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp
         "hive_num" : hive_nb,
         "inhive_loc" : ihl,
     }
-    df = download_tmp_DB('ObsHiveABC', start_ts, end_ts, resolution=resolution, filters=filters, aggr="last")
+    df = download_tmp_DB(bucket, start_ts, end_ts, resolution=resolution, filters=filters, aggr="last")
     if only_amb_T:
         df = extractAmbientTemp(df)
         # Convert pd.Series to pd.Dataframe
         df = df.to_frame(name="Tamb")
-    
+
     # remove "inhive_loc" key from filters
     filters.pop("inhive_loc")
-    co2_data = download_co2_DB('ObsHiveABC', start_ts, end_ts, resolution = resolution, filters = filters)
+    co2_data = download_co2_DB(bucket, start_ts, end_ts, resolution = resolution, filters = filters)
     # Keep only the columns that start with the same letter as the first letter of ihl (i.e. "u" for "upper" and "l" for "lower")
     co2_data = co2_data.loc[:, co2_data.columns.str.startswith(ihl[0])]
     for col in co2_data.columns:
         col_name = f"co2_{col[-1].upper()}"
         df[col_name] = co2_data.loc[:,col] # This should add 2 columns: (ul and ur) OR (ll and lr)
-    
+
     # Add a _field tag and _measurement tag to filters
     filters["field"] = ["rel_humid"]
     filters["measurement"] = ["co2", "rht"]
     filters["inhive_loc"] = ihl
-    humid_data = download_data_DB('ObsHiveABC', start_ts, end_ts, resolution=resolution, filters=filters)
+    humid_data = download_data_DB(bucket, start_ts, end_ts, resolution=resolution, filters=filters)
     
     # For every ts in df, there are several ts in humid_data. We want to take the average of the values in humid_data for each ts in df_resampled and store it in the "rel_humid" column of df_resampled.
     df["rel_humid"] = df.index.to_series().apply(lambda ts: humid_data.loc[humid_data.index == ts, "_value"].mean())
