@@ -239,12 +239,16 @@ def load_umap_points(watershed_path: Path) -> np.ndarray:
     return wshedfile['zValues']
 
 
-def load_umap_projection_metadata(projections_dir: Path, dataset_id: int) -> Dict[str, object]:
-    candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals.mat")))[0]
-    pcamodes_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes.mat")))[0]
-    output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals_outputStatistics.pkl")))
+def load_umap_projection_metadata(projections_dir: Path, dataset_id) -> Dict[str, object]:
+    # No leading "_" before {dataset_id}: the old convention ("dataset_0_pcaModes...")
+    # still matches without it, but the newer per-dataset naming used for Metabolism
+    # projections ("SharpDay_hive1_upper_pcaModes...") has no separator before the id,
+    # so requiring one made every glob below return an empty list.
+    candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_uVals.mat")))[0]
+    pcamodes_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes.mat")))[0]
+    output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_uVals_outputStatistics.pkl")))
     if not output_statistics_candidate:
-        output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_zVals_outputStatistics.pkl")))
+        output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_zVals_outputStatistics.pkl")))
     output_statistics_candidate = output_statistics_candidate[0]
 
     projection = hdf5storage.loadmat(candidate)
@@ -508,13 +512,23 @@ def resolve_macos_alias(path: str) -> Path:
     source_path = Path(path)
     if source_path.is_symlink():
         return source_path.resolve()
+    # Real media files (e.g. the Metabolism .mp4s) already have an extension and exist as
+    # themselves -- unlike the old extension-less Finder-alias placeholders (".../dataset1"),
+    # they need no resolution. Skip straight past them instead of running a doomed AppleScript
+    # call (and leaking its Finder error text to stderr) on every real file.
+    if source_path.suffix and source_path.exists():
+        return source_path
     apple_script = (
         'set a to POSIX file "{}" as alias\n'
         'tell application "Finder" to set b to original item of a\n'
         'return POSIX path of (b as alias)'
     ).format(str(source_path).replace('"', '\\"'))
     try:
-        resolved = subprocess.check_output(["osascript", "-e", apple_script], universal_newlines=True).strip()
+        resolved = subprocess.check_output(
+            ["osascript", "-e", apple_script],
+            universal_newlines=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         if resolved:
             return Path(resolved)
     except Exception:
