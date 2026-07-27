@@ -204,18 +204,13 @@ def plot_ethogram(E, nregions, day_names, day_boundaries, nb_points_per_day, tit
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         x_coords = time_nums
 
-    # y ticks: include cannot-classify label as last row
-    n_yticks = min(12, max(nrows, 1))
-    if nrows > 1:
-        y_pos = np.linspace(0, nrows - 1, n_yticks, dtype=int)
-    else:
-        y_pos = np.array([0], dtype=int)
-    y_labels = []
-    for i in y_pos:
-        if i < nregions:
-            y_labels.append(f"Region {i+1}")
-        else:
-            y_labels.append("cannot classify")
+    # y ticks: one label per row (region), plus the cannot-classify row. Previously capped at
+    # 12 ticks via np.linspace subsampling, which skipped whichever region numbers didn't land
+    # on a sampled row (e.g. regions 4, 8, 12, 15 out of 16 rows) -- not because those regions
+    # were empty, but purely as an artifact of the even sampling. Region counts here are small
+    # enough (tens, not hundreds) that labeling every row is fine.
+    y_pos = np.arange(nrows)
+    y_labels = [f"Region {i+1}" if i < nregions else "cannot classify" for i in y_pos]
     ax.set_yticks(y_pos + 0.5)
     ax.set_yticklabels(y_labels)
 
