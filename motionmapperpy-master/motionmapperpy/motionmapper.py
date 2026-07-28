@@ -774,7 +774,8 @@ def findTDistributedProjections_fmin(data, trainingData, trainingEmbedding, para
     return zValues,zCosts,zGuesses,inConvHull,meanMax,exitFlags
 
 
-def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, timestamps=None, chunk_ids=None):
+def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, timestamps=None, chunk_ids=None,
+                    saveWaveletAmps=False):
     """
     findEmbeddings finds the optimal embedding of a data set into a previously
     found t-SNE embedding.
@@ -784,6 +785,9 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, tim
     :param parameters: motionmapperpy Parameters dictionary.
     :param timestamps: Optional timestamps used to split wavelet computation into contiguous chunks.
     :param chunk_ids: Optional chunk labels used to split wavelet computation into contiguous chunks.
+    :param saveWaveletAmps: If True, stash the (normalized) wavelet amplitude array and frequency axis into
+    outputStatistics as `waveletAmplitudes`/`waveletFrequencies`, instead of discarding them. Off by default so
+    every other call site is unaffected.
     :return: zValues : N x 2 array of embedding results, outputStatistics : dictionary containing other parametric
     outputs.
     """
@@ -822,6 +826,13 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, tim
         data = projections
     data = data / np.sum(data, 1)[:, None]
 
+    if saveWaveletAmps:
+        # Captured now, under different names, because the UMAP branch below shadows the local
+        # `f` (wavelet frequencies) with a file handle (`with open(...) as f`) -- capturing here
+        # avoids relying on `f` after that point.
+        savedWaveletAmplitudes = data.copy()
+        savedWaveletFrequencies = f
+
     print('Finding Embeddings')
     t1 = time.time()
     if parameters.method == 'TSNE':
@@ -857,6 +868,9 @@ def findEmbeddings(projections, trainingData, trainingEmbedding, parameters, tim
         outputStatistics.waveletCoverage = report
     else:
         raise ValueError('Supported parameter.method are \'TSNE\' or \'UMAP\'')
+    if saveWaveletAmps:
+        outputStatistics.waveletAmplitudes = savedWaveletAmplitudes
+        outputStatistics.waveletFrequencies = savedWaveletFrequencies
     del data
     print('Embeddings found in %0.02f seconds.'%(time.time()-t1))
 
