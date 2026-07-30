@@ -2,6 +2,121 @@ import numpy as np
 import motionmapperpy as mmpy
 import matplotlib.pyplot as plt
 import pandas as pd
+import os
+from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.InfluxDBInterface.libdb import download_tmp_DB, download_data_DB, download_co2_DB
+from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.thermalutil import extractAmbientTemp
+from Metabolism.VisualActivity.RHCVisualisation.RHCImaging.libimage import fetchImagesPaths
+from Metabolism.VisualActivity.libActivity import computeRpiActivities
+
+
+def download_dataset(hive_nb:int, ihl:str, resolution:int, start_ts:pd.Timestamp, end_ts:pd.Timestamp, only_amb_T:bool=False, visualActivityPath:str=None, bucket:str="ObsHiveABC", verbose:bool=False)-> pd.DataFrame:
+    """
+    Download the dataset for a given hive number and in-hive location.
+
+    Parameters:
+    - hive_nb (int): Hive number.
+    - ihl (str): In-hive location, either "upper" or "lower".
+    - resolution (int): Resolution in seconds.
+    - start_ts (pd.Timestamp): Start timestamp for the data.
+    - end_ts (pd.Timestamp): End timestamp for the data.
+    - only_amb_T (bool): If True, only return ambient temperature data.
+    - visualActivityPath (str): Path to visual activity data. Will not be used if None.
+    - bucket (str): InfluxDB bucket to download the data from (e.g. "ObsHiveABC", "winter_exp", "a_sensing"). See MetabolicExp.buckets_by_type.
+    - verbose (bool): If True, print verbose output.
+    """
+    assert ihl in ["upper", "lower"], "inhive_loc must be either 'upper' or 'lower'"
+    assert hive_nb in [1, 2], "hive_num must be either 1 or 2"
+    filters = {
+        "hive_num" : hive_nb,
+        "inhive_loc" : ihl,
+    }
+    df = download_tmp_DB(bucket, start_ts, end_ts, resolution=resolution, filters=filters, aggr="last")
+    if only_amb_T:
+        df = extractAmbientTemp(df)
+        # Convert pd.Series to pd.Dataframe
+        df = df.to_frame(name="Tamb")
+
+    # remove "inhive_loc" key from filters
+    filters.pop("inhive_loc")
+    co2_data = download_co2_DB(bucket, start_ts, end_ts, resolution = resolution, filters = filters)
+    # Keep only the columns that start with the same letter as the first letter of ihl (i.e. "u" for "upper" and "l" for "lower")
+    co2_data = co2_data.loc[:, co2_data.columns.str.startswith(ihl[0])]
+    for col in co2_data.columns:
+        col_name = f"co2_{col[-1].upper()}"
+        df[col_name] = co2_data.loc[:,col] # This should add 2 columns: (ul and ur) OR (ll and lr)
+
+    # Add a _field tag and _measurement tag to filters
+    filters["field"] = ["rel_humid"]
+    filters["measurement"] = ["co2", "rht"]
+    filters["inhive_loc"] = ihl
+    humid_data = download_data_DB(bucket, start_ts, end_ts, resolution=resolution, filters=filters)
+    
+    # For every ts in df, there are several ts in humid_data. We want to take the average of the values in humid_data for each ts in df_resampled and store it in the "rel_humid" column of df_resampled.
+    df["rel_humid"] = df.index.to_series().apply(lambda ts: humid_data.loc[humid_data.index == ts, "_value"].mean())
+
+    recovery_time = 240 # minutes
+    if visualActivityPath is not None:
+        assert os.path.isdir(visualActivityPath), f"Visual activity path {visualActivityPath} is not a directory."
+        assert visualActivityPath.endswith("Images/"), f"Visual activity path {visualActivityPath} must end with 'Images/'."
+        
+        # Convert resolution from seconds to a Timedelta for easier handling of time intervals
+        t_res = pd.to_timedelta(resolution, unit='s')
+
+        # Get the target dt (for which we need an image, data, etc.)
+        datetimes = pd.date_range(start_ts, end_ts, freq=t_res)
+        datetimes = datetimes.to_list()
+        if verbose:
+            print(f"Number of timestamps considered: {len(datetimes)}")
+
+        imgs_paths = fetchImagesPaths(visualActivityPath, datetimes, hive_nb, recovery_time, verbose=verbose)
+
+        # Checking if any ts is invalid:
+        invalid_ts = imgs_paths[imgs_paths['valid'] == False]
+        if not invalid_ts.empty:
+            print(f"{len(invalid_ts)} invalid timestamp(s) found out of {len(imgs_paths)} total timestamps.")
+
+        # computeRpiActivities() only compares consecutive rows and doesn't care about validity
+        # itself, so dropping ALL invalid timestamps would end up pairing up rows that aren't
+        # actually temporally adjacent. Instead, we keep invalid timestamps that immediately
+        # precede a valid one, since they are needed as the "before" reference to compute the
+        # activity of the first valid timestamp following an invalid stretch. Other invalid
+        # timestamps (whose own resulting activity would itself be invalid) are dropped.
+        valid = imgs_paths['valid'].to_numpy()
+        keep = valid.copy()
+        keep[:-1] |= (~valid[:-1]) & valid[1:]
+        imgs_paths = imgs_paths[keep].drop(columns=['valid'])
+        if imgs_paths.empty:
+            raise ValueError("No valid images found for the specified timestamps.")
+
+        if imgs_paths.isnull().values.any():
+            # Remove rows with None values
+            imgs_paths = imgs_paths.dropna()
+        
+        # Split the remaining rows into chunks that are contiguous in time (i.e., with no
+        # dropped timestamp in between) and run computeRpiActivities() separately on each chunk,
+        # then concatenate the results. This is needed because computeRpiActivities() pairs up
+        # consecutive rows of the DataFrame and assumes they are also temporally consecutive.
+        chunk_ids = (imgs_paths.index.to_series().diff() != t_res).cumsum()
+
+        RpiActivities = []
+        for _, chunk in imgs_paths.groupby(chunk_ids):
+            if len(chunk) < 2:
+                continue  # Need at least 2 rows to compute an activity
+            chunk_activities, _ = computeRpiActivities(chunk)
+            RpiActivities.extend(chunk_activities)
+
+        for _act in RpiActivities:
+            df.loc[_act.ts,"activity"] = _act.ihl_activity[ihl]
+
+    
+    # Filter out timestamps not allowed by HiveOpenings
+    from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.RHCImaging.HiveOpenings.libOpenings import filter_timestamps
+    print("Before filtering with HiveOpenings:", len(df), "lines")
+    filtered_ts = filter_timestamps(df.index.to_list(), hive_nb=hive_nb, recovery_time=recovery_time)
+    df_resampled = df[df.index.isin(filtered_ts)]
+    print("After  :", len(df_resampled), "lines")
+    
+    return df_resampled
 
 def build_ethogram(w):
     """Build ethogram matrix from watershed region vector `w`.
@@ -89,18 +204,13 @@ def plot_ethogram(E, nregions, day_names, day_boundaries, nb_points_per_day, tit
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         x_coords = time_nums
 
-    # y ticks: include cannot-classify label as last row
-    n_yticks = min(12, max(nrows, 1))
-    if nrows > 1:
-        y_pos = np.linspace(0, nrows - 1, n_yticks, dtype=int)
-    else:
-        y_pos = np.array([0], dtype=int)
-    y_labels = []
-    for i in y_pos:
-        if i < nregions:
-            y_labels.append(f"Region {i+1}")
-        else:
-            y_labels.append("cannot classify")
+    # y ticks: one label per row (region), plus the cannot-classify row. Previously capped at
+    # 12 ticks via np.linspace subsampling, which skipped whichever region numbers didn't land
+    # on a sampled row (e.g. regions 4, 8, 12, 15 out of 16 rows) -- not because those regions
+    # were empty, but purely as an artifact of the even sampling. Region counts here are small
+    # enough (tens, not hundreds) that labeling every row is fine.
+    y_pos = np.arange(nrows)
+    y_labels = [f"Region {i+1}" if i < nregions else "cannot classify" for i in y_pos]
     ax.set_yticks(y_pos + 0.5)
     ax.set_yticklabels(y_labels)
 

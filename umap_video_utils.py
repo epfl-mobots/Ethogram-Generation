@@ -318,6 +318,30 @@ def render_snapshot_panel(
     return frame
 
 
+def render_umap_background(
+    ax,
+    density: np.ndarray,
+    *,
+    extent: Tuple[float, float, float, float],
+    wbounds: Optional[Sequence[np.ndarray]] = None,
+    background_cmap: str = "magma",
+) -> None:
+    """Draw the watershed density image and region-boundary outlines onto `ax`.
+
+    Factored out of render_umap_panel() so other tools (e.g. an interactive click-to-inspect
+    app) can draw the same background without duplicating this logic or going through the
+    frame-rendering/video-frame path render_umap_panel() is built for.
+    """
+    ax.imshow(density, origin="lower", cmap=background_cmap, extent=extent, aspect="auto")
+
+    if wbounds:
+        for boundary in wbounds:
+            boundary = np.asarray(boundary, dtype=float)
+            if boundary.ndim != 2 or boundary.shape[1] != 2:
+                continue
+            ax.plot(boundary[:, 0], boundary[:, 1], color="white", linewidth=0.8, alpha=0.8)
+
+
 def render_umap_panel(
     point: Sequence[float],
     density: np.ndarray,
@@ -336,14 +360,7 @@ def render_umap_panel(
     tick_labelsize: int = 12,
 ) -> np.ndarray:
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    ax.imshow(density, origin="lower", cmap=background_cmap, extent=extent, aspect="auto")
-
-    if wbounds:
-        for boundary in wbounds:
-            boundary = np.asarray(boundary, dtype=float)
-            if boundary.ndim != 2 or boundary.shape[1] != 2:
-                continue
-            ax.plot(boundary[:, 0], boundary[:, 1], color="white", linewidth=0.8, alpha=0.8)
+    render_umap_background(ax, density, extent=extent, wbounds=wbounds, background_cmap=background_cmap)
 
     if barycenters:
         bary_array = np.asarray(list(barycenters.values()), dtype=float)
@@ -508,13 +525,23 @@ def resolve_macos_alias(path: str) -> Path:
     source_path = Path(path)
     if source_path.is_symlink():
         return source_path.resolve()
+    # Real media files (e.g. the Metabolism .mp4s) already have an extension and exist as
+    # themselves -- unlike the old extension-less Finder-alias placeholders (".../dataset1"),
+    # they need no resolution. Skip straight past them instead of running a doomed AppleScript
+    # call (and leaking its Finder error text to stderr) on every real file.
+    if source_path.suffix and source_path.exists():
+        return source_path
     apple_script = (
         'set a to POSIX file "{}" as alias\n'
         'tell application "Finder" to set b to original item of a\n'
         'return POSIX path of (b as alias)'
     ).format(str(source_path).replace('"', '\\"'))
     try:
-        resolved = subprocess.check_output(["osascript", "-e", apple_script], universal_newlines=True).strip()
+        resolved = subprocess.check_output(
+            ["osascript", "-e", apple_script],
+            universal_newlines=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
         if resolved:
             return Path(resolved)
     except Exception:

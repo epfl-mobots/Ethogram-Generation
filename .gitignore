@@ -6,3 +6,6 @@ Results
 outputVideos
 
 __pycache__
+
+# Dask stuff
+dask-worker-space
