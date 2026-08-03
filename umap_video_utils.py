@@ -239,12 +239,16 @@ def load_umap_points(watershed_path: Path) -> np.ndarray:
     return wshedfile['zValues']
 
 
-def load_umap_projection_metadata(projections_dir: Path, dataset_id: int) -> Dict[str, object]:
-    candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals.mat")))[0]
-    pcamodes_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes.mat")))[0]
-    output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_uVals_outputStatistics.pkl")))
+def load_umap_projection_metadata(projections_dir: Path, dataset_id) -> Dict[str, object]:
+    # No leading "_" before {dataset_id}: the old convention ("dataset_0_pcaModes...")
+    # still matches without it, but the newer per-dataset naming used for Metabolism
+    # projections ("SharpDay_hive1_upper_pcaModes...") has no separator before the id,
+    # so requiring one made every glob below return an empty list.
+    candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_uVals.mat")))[0]
+    pcamodes_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes.mat")))[0]
+    output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_uVals_outputStatistics.pkl")))
     if not output_statistics_candidate:
-        output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*_{dataset_id}_pcaModes_zVals_outputStatistics.pkl")))
+        output_statistics_candidate = sorted(glob.glob(str(projections_dir / f"*{dataset_id}_pcaModes_zVals_outputStatistics.pkl")))
     output_statistics_candidate = output_statistics_candidate[0]
 
     projection = hdf5storage.loadmat(candidate)
