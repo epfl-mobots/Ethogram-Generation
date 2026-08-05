@@ -3,6 +3,7 @@ import motionmapperpy as mmpy
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
+from tqdm import tqdm
 from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.InfluxDBInterface.libdb import download_tmp_DB, download_data_DB, download_co2_DB
 from Metabolism.VisualActivity.RHCVisualisation.RHCThermalPlots.thermalutil import extractAmbientTemp
 from Metabolism.VisualActivity.RHCVisualisation.RHCImaging.libimage import fetchImagesPaths
@@ -131,13 +132,21 @@ def download_dataset(hive_nb:int, resolution:int, start_ts:pd.Timestamp, end_ts:
         # then concatenate the results. This is needed because computeRpiActivities() pairs up
         # consecutive rows of the DataFrame and assumes they are also temporally consecutive.
         chunk_ids = (imgs_paths.index.to_series().diff() != t_res).cumsum()
+        chunks = [chunk for _, chunk in imgs_paths.groupby(chunk_ids)]
+
+        # Progress is tracked in image-pairs (rather than chunks) since chunk sizes vary a lot,
+        # which makes the tqdm ETA meaningful instead of jumping around with every chunk.
+        total_pairs = sum(max(len(chunk) - 1, 0) for chunk in chunks)
 
         RpiActivities = []
-        for _, chunk in imgs_paths.groupby(chunk_ids):
-            if len(chunk) < 2:
-                continue  # Need at least 2 rows to compute an activity
-            chunk_activities, _ = computeRpiActivities(chunk)
-            RpiActivities.extend(chunk_activities)
+        with tqdm(total=total_pairs, desc="Computing visual activity", unit="pair") as pbar:
+            for chunk in chunks:
+                if len(chunk) < 2:
+                    continue  # Need at least 2 rows to compute an activity
+                # pbar is advanced per image-pair inside computeRpiActivities (via the dask
+                # distributed client) rather than once per chunk here.
+                chunk_activities, _ = computeRpiActivities(chunk, pbar=pbar)
+                RpiActivities.extend(chunk_activities)
 
         for _act in RpiActivities:
             df.loc[_act.ts,"activity"] = _act.hive_activity if whole_hive else _act.ihl_activity[ihl]
