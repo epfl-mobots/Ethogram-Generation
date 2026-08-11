@@ -24,10 +24,12 @@ one from the projects discovered under Results/.
 
 import argparse
 import sys
+import tkinter
 from pathlib import Path
+from tkinter import filedialog
 
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Button, Slider
 
 from umap_interp_utils import (
     average_neighbor_traces,
@@ -103,24 +105,23 @@ def main():
     ax_map = fig.add_subplot(outer_gs[0, 1])
     traces_slot_right = outer_gs[0, 2]
     ax_slider = fig.add_subplot(outer_gs[1, 1])
+    # Fixed figure-fraction placement (not part of the gridspec) so it keeps a compact button
+    # size regardless of how the surrounding columns get resized/rebuilt on each click.
+    ax_save_button = fig.add_axes([0.90, 0.03, 0.07, 0.045])
 
     current_k = args.k
     last_click = {"left": None, "right": None}
 
     render_umap_background(ax_map, index.density, extent=index.extent, wbounds=index.wbounds)
     ax_map.scatter(index.pooled_xy[:, 0], index.pooled_xy[:, 1], s=1, c="white", alpha=0.08, linewidths=0)
-    ax_map.set_title(f"{project_dir.name} ({index.pooled_xy.shape[0]} points, {len(index.dataset_status)} datasets)\n"
-                      f"left-click -> left panel, right-click -> right panel")
+    ax_map.set_title(f"{project_dir.name} ({index.pooled_xy.shape[0]} points, {len(index.dataset_status)} datasets)")
     ax_map.set_xlabel("UMAP 1")
     ax_map.set_ylabel("UMAP 2")
 
     k_slider = Slider(ax_slider, "k (neighbors)", valmin=1, valmax=max(args.k_max, args.k), valinit=args.k, valstep=1)
 
-    highlight_left = ax_map.scatter([], [], s=40, facecolors="none", edgecolors="red", linewidths=1.4,
-                                     zorder=5, label="left-click")
-    highlight_right = ax_map.scatter([], [], s=40, facecolors="none", edgecolors="dodgerblue", linewidths=1.4,
-                                      zorder=5, label="right-click")
-    ax_map.legend(loc="upper right", fontsize=8)
+    highlight_left = ax_map.scatter([], [], s=40, facecolors="none", edgecolors="red", linewidths=1.4, zorder=5)
+    highlight_right = ax_map.scatter([], [], s=40, facecolors="none", edgecolors="dodgerblue", linewidths=1.4, zorder=5)
 
     sides = {}
 
@@ -222,8 +223,37 @@ def main():
         fig.tight_layout()
         fig.canvas.draw_idle()
 
+    def on_save_clicked(event):
+        # A fresh, hidden root per click: simplest way to get a native save-file dialog without
+        # keeping a whole second Tk mainloop running alongside whatever backend matplotlib is using.
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.asksaveasfilename(
+            title="Save current view as...",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"), ("All files", "*.*")],
+        )
+        root.destroy()
+        if not path:
+            return  # user cancelled
+        fig.savefig(path, dpi=150)
+        print(f"\nSaved current view to {path}")
+
+    save_button = Button(ax_save_button, "Save image")
+    save_button.on_clicked(on_save_clicked)
+
     fig.canvas.mpl_connect("button_press_event", on_click)
     k_slider.on_changed(on_k_changed)
+
+    # matplotlib widgets are only weakly referenced by the event system -- without an explicit
+    # strong reference that outlives this function's own locals, they can silently stop firing
+    # once GC runs (e.g. triggered by the axes churn in rebuild_trace_axes()). plt.show() blocks
+    # here for real interactive backends, which incidentally keeps main()'s locals alive for the
+    # whole session, but that's not something to rely on -- attaching to the figure is the robust
+    # fix matplotlib's own docs recommend.
+    fig._umap_inspector_widgets = (k_slider, save_button)
+
     plt.tight_layout()
     plt.show()
 
