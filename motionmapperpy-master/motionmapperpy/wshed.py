@@ -3,6 +3,7 @@ import glob
 import h5py
 import hdf5storage
 import time
+from scipy.ndimage import distance_transform_edt
 from skimage.segmentation import watershed
 from skimage.filters import roberts
 
@@ -37,6 +38,36 @@ def wshedTransform(zValues, min_regions, sigma, tsnefolder, saveplot=True):
         print('\t Sigma %0.2f, Regions %i' % (sigma, numRegs), end='\r')
     for i, wreg in enumerate(np.unique(wshed)):
         wshed[wshed == wreg] = i
+
+    # A catchment can end up with zero assigned data points: the smoothed density estimate
+    # carves out a local-minimum pocket, but no actual (digitized) point lands in it. Left in
+    # place this produces gaps in the region numbering downstream (findWatershedRegions /
+    # makeGroupsAndSegments assume ids run 1..LL.max() contiguously), so merge any empty
+    # catchment into its nearest non-empty neighbor and relabel to a contiguous range before
+    # finalizing -- using the same digitize+lookup findWatershedRegions uses to assign points,
+    # so a region kept here is guaranteed to have points assigned to it later.
+    digitized = np.digitize(zValues, xx)
+    assigned = wshed[digitized[:, 1], digitized[:, 0]]
+    region_ids = np.unique(wshed)
+    region_ids = region_ids[region_ids > 0]
+    present = np.unique(assigned)
+    present = present[present > 0]
+    empty_regions = np.setdiff1d(region_ids, present)
+    if empty_regions.size > 0:
+        print('\t %i empty region(s) found (0 assigned points): %s -- merging into nearest neighbor.'
+              % (empty_regions.size, empty_regions.tolist()))
+        mask_drop = np.isin(wshed, empty_regions)
+        valid = (wshed > 0) & (~mask_drop)
+        _, indices = distance_transform_edt(~valid, return_distances=True, return_indices=True)
+        wshed[mask_drop] = wshed[tuple(indices)][mask_drop]
+        remaining = np.unique(wshed)
+        remaining = remaining[remaining > 0]
+        relabeled = np.zeros_like(wshed)
+        for i, wreg in enumerate(sorted(remaining), start=1):
+            relabeled[wshed == wreg] = i
+        wshed = relabeled
+        numRegs = len(remaining)
+
     wbounds = np.where(roberts(wshed).astype('bool'))
     wbounds = (wbounds[1], wbounds[0])
     if saveplot:
@@ -46,16 +77,16 @@ def wshedTransform(zValues, min_regions, sigma, tsnefolder, saveplot=True):
         fig, axes = plt.subplots(1, 2, figsize=(10, 6))
         fig.subplots_adjust(0, 0, 1, 1, 0, 0)
         ax = axes[0]
+        ax.imshow(density, origin='lower', cmap=bmapcmap)
+        ax.scatter(wbounds[0], wbounds[1], color='k', s=0.1)
+        ax.axis('off')
+
+        ax = axes[1]
         ax.imshow(randomizewshed(wshed), origin='lower', cmap=bmapcmap)
         for i in np.unique(wshed)[1:]:
             fontsize = 8
             xinds, yinds = np.where(wshed == i)
             ax.text(np.mean(yinds) - fontsize, np.mean(xinds) - fontsize, str(i), fontsize=fontsize, fontweight='bold')
-        ax.axis('off')
-
-        ax = axes[1]
-        ax.imshow(density, origin='lower', cmap=bmapcmap)
-        ax.scatter(wbounds[0], wbounds[1], color='k', s=0.1)
         ax.axis('off')
 
         fig.savefig(tsnefolder + 'zWshed%i.png' % numRegs)

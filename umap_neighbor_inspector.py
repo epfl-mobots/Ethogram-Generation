@@ -24,6 +24,7 @@ one from the projects discovered under Results/.
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -146,6 +147,7 @@ def main():
     ax_save_button = fig.add_subplot(right_controls_gs[0, 1])
 
     current_k = args.k
+    save_message = {"artist": None, "timer": None, "shown_at": None}
     co2_mode = "averaged"
     sync_y = False
     last_click = {"left": None, "right": None}
@@ -229,7 +231,7 @@ def main():
                     ax.plot(relative_hours, mean_vals, color=sides[name]["color"])
                     ax.fill_between(relative_hours, mean_vals - std_vals, mean_vals + std_vals,
                                      color=sides[name]["color"], alpha=0.25, linewidth=0)
-                    ax.set_ylabel(f"{group_label} (avg±std, n={len(member_cols)})", fontsize=9)
+                    ax.set_ylabel(group_label, fontsize=9)
                 else:
                     ax.plot(relative_hours, averaged[member_cols[0]], color=sides[name]["color"])
                     ax.set_ylabel(member_cols[0], fontsize=9)
@@ -329,10 +331,49 @@ def main():
         # remembers -- not something this app can point at --figures-dir. Saving straight there
         # with an auto-generated name sidesteps that entirely (and avoids tkinter, which is what
         # previously made the button unresponsive and crashed the app on close).
+        # Clear any still-visible confirmation from a rapid previous click *before* saving, so a
+        # leftover banner from the last save never ends up baked into this one's PNG.
+        clear_save_message()
+
         figures_dir.mkdir(parents=True, exist_ok=True)
         path = figures_dir / f"{project_dir.name}_k{current_k}_{datetime.now():%Y%m%d_%H%M%S}.png"
         fig.savefig(path, dpi=150, bbox_inches=row0_bbox_inches())
         print(f"\nSaved current view to {path}")
+        show_save_message(f"Saved to {path.name}")
+
+    def clear_save_message():
+        if save_message["timer"] is not None:
+            save_message["timer"].stop()
+            save_message["timer"] = None
+        if save_message["artist"] is not None:
+            save_message["artist"].remove()
+            save_message["artist"] = None
+            save_message["shown_at"] = None
+            fig.canvas.draw_idle()
+
+    def show_save_message(text):
+        save_message["artist"] = fig.text(
+            0.5, 0.97, text, ha="center", va="top", fontsize=11, color="white",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="tab:green", alpha=0.85, edgecolor="none"),
+            zorder=100,
+        )
+        save_message["shown_at"] = time.monotonic()
+        fig.canvas.draw_idle()
+
+        timer = fig.canvas.new_timer(interval=3000)
+        timer.single_shot = True
+        timer.add_callback(clear_save_message)
+        timer.start()
+        save_message["timer"] = timer
+
+    def clear_save_message_if_expired(_event):
+        # Backup for the timer above: matplotlib's native macOS timer can be unreliable once
+        # embedded in a widget-heavy app (observed: it can silently never fire here, even though
+        # it fires fine in isolation), so any subsequent mouse movement also clears an expired
+        # message. Mouse-move events fire constantly during normal use, so in practice this still
+        # clears within a fraction of a second of the 3s mark even if the timer never fires.
+        if save_message["shown_at"] is not None and time.monotonic() - save_message["shown_at"] >= 3.0:
+            clear_save_message()
 
     save_button = Button(ax_save_button, "Save image")
     save_button.on_clicked(on_save_clicked)
@@ -349,6 +390,7 @@ def main():
     sync_check.on_clicked(on_sync_changed)
 
     fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("motion_notify_event", clear_save_message_if_expired)
     k_slider.on_changed(on_k_changed)
 
     # matplotlib widgets are only weakly referenced by the event system -- without an explicit
