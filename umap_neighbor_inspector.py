@@ -24,12 +24,12 @@ one from the projects discovered under Results/.
 
 import argparse
 import sys
-import tkinter
+from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog
 
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button, Slider
+from matplotlib.transforms import Bbox
+from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 
 from umap_interp_utils import (
     average_neighbor_traces,
@@ -39,6 +39,29 @@ from umap_interp_utils import (
     load_project_index,
 )
 from umap_video_utils import render_umap_background
+
+
+def build_plot_groups(columns, co2_mode):
+    """Group an averaged-traces DataFrame's columns into an ordered list of (label, member_cols)
+    plot groups. Every non-CO2 column gets its own single-member group, as before. CO2 columns
+    (co2_UL/UR/LL/LR for WholeHive datasets, co2_L/co2_R otherwise) are collapsed into one
+    "co2" group -- rendered as the across-sensor mean +/- std -- when co2_mode is "averaged" and
+    there's more than one of them; otherwise each stays its own group, same as any other column.
+    """
+    cols = sorted(columns)
+    co2_cols = [c for c in cols if c.lower().startswith("co2")]
+    other_cols = [c for c in cols if c not in co2_cols]
+
+    groups = [(c, [c]) for c in other_cols]
+    if co2_mode == "averaged" and len(co2_cols) > 1:
+        groups.append(("co2", co2_cols))
+    else:
+        groups.extend((c, [c]) for c in co2_cols)
+
+    # Sort by each group's lowest member column name so the co2 group lands where its members
+    # would have, keeping the overall panel order close to plain alphabetical.
+    groups.sort(key=lambda item: min(item[1]))
+    return groups
 
 
 def pick_project(explicit_path):
@@ -85,9 +108,15 @@ def main():
                               "(default fallback: 60).")
     parser.add_argument("--intermediate-dir", type=str, default="Results/Intermediate_Results",
                          help="Directory holding per-dataset raw sensor pickles (default: Results/Intermediate_Results).")
+    parser.add_argument(
+        "--figures-dir", type=str,
+        default="/Users/cyrilmonette/Desktop/EPFL 2018-2026/PhD - Mobots/Publishing/Publications/Metabolism/figures",
+        help="Directory the 'Save image' button writes into (default: %(default)s).",
+    )
     args = parser.parse_args()
 
     project_dir = pick_project(args.project)
+    figures_dir = Path(args.figures_dir)
     print(f"Loading project index for {project_dir} ...")
     index = load_project_index(project_dir)
     print(f"Loaded {index.pooled_xy.shape[0]} pooled points across {len(index.dataset_status)} datasets.")
@@ -95,21 +124,30 @@ def main():
         if status != "ok":
             print(f"  WARNING: {source_id}: {status}")
 
-    # Layout: [left traces column] [density map] [right traces column], with a k-slider in a
-    # thin row below the map. Left-click updates the left column, right-click updates the right
-    # one, so two distinct (possibly far apart) areas of the embedding can be compared side by
-    # side without one click overwriting the other.
+    # Layout: [left traces column] [density map] [right traces column] in row 0, with every
+    # control (CO2 mode, k-slider, sync checkbox + save button) in row 1 below. Every one of
+    # these -- including the widgets -- is a genuine gridspec cell (fig.add_subplot), not a
+    # fixed figure-fraction axes (fig.add_axes). Mixing the two is what caused the earlier bugs:
+    # plt.tight_layout() explicitly does not know how to account for fixed-position axes (it
+    # warns "Axes that are not compatible with tight_layout"), so it would happily let row 0's
+    # trace panels grow down into where a fixed-position widget visually sat, since gridspec
+    # cells are the only thing tight_layout guarantees won't overlap each other.
     fig = plt.figure(figsize=(19, 7.5))
-    outer_gs = fig.add_gridspec(2, 3, width_ratios=[1, 1.4, 1], height_ratios=[20, 1], wspace=0.35, hspace=0.35)
+    outer_gs = fig.add_gridspec(2, 3, width_ratios=[1, 1.4, 1], height_ratios=[6, 1], wspace=0.35, hspace=0.55)
     traces_slot_left = outer_gs[0, 0]
     ax_map = fig.add_subplot(outer_gs[0, 1])
     traces_slot_right = outer_gs[0, 2]
+
+    ax_co2_mode = fig.add_subplot(outer_gs[1, 0])
+    ax_co2_mode.set_title("CO2 display", fontsize=8)
     ax_slider = fig.add_subplot(outer_gs[1, 1])
-    # Fixed figure-fraction placement (not part of the gridspec) so it keeps a compact button
-    # size regardless of how the surrounding columns get resized/rebuilt on each click.
-    ax_save_button = fig.add_axes([0.90, 0.03, 0.07, 0.045])
+    right_controls_gs = outer_gs[1, 2].subgridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
+    ax_sync_check = fig.add_subplot(right_controls_gs[0, 0])
+    ax_save_button = fig.add_subplot(right_controls_gs[0, 1])
 
     current_k = args.k
+    co2_mode = "averaged"
+    sync_y = False
     last_click = {"left": None, "right": None}
 
     render_umap_background(ax_map, index.density, extent=index.extent, wbounds=index.wbounds)
@@ -134,8 +172,8 @@ def main():
         axes.append(ax)
         sides[name] = {"slot": slot, "axes": axes, "color": color}
 
-    init_side("left", traces_slot_left, "tab:red", "Left-click a point to show its neighbor traces here")
-    init_side("right", traces_slot_right, "tab:blue", "Right-click a (different) point to show its traces here")
+    init_side("left", traces_slot_left, "tab:red", "Click a point on the map to show its neighbor traces here")
+    init_side("right", traces_slot_right, "tab:blue", "A second selection appears here for comparison")
 
     def rebuild_trace_axes(name, n):
         state = sides[name]
@@ -176,17 +214,61 @@ def main():
             for source_id, reason in report["skipped"]:
                 print(f"    {source_id}: {reason}")
 
-        axes = rebuild_trace_axes(name, 0 if averaged.empty else len(averaged.columns))
+        plot_groups = [] if averaged.empty else build_plot_groups(averaged.columns, co2_mode)
+        axes = rebuild_trace_axes(name, len(plot_groups))
+        label_axes = {}
         if not averaged.empty:
             relative_hours = averaged.index.total_seconds() / 3600.0
-            for ax, col in zip(axes, averaged.columns):
-                ax.plot(relative_hours, averaged[col], color=sides[name]["color"])
+            for ax, (group_label, member_cols) in zip(axes, plot_groups):
+                if len(member_cols) > 1:
+                    # CO2 averaged across sensors (e.g. the 4 WholeHive corners): one mean line
+                    # plus a +/-std band showing spread across sensors at each relative time.
+                    values = averaged[member_cols]
+                    mean_vals = values.mean(axis=1)
+                    std_vals = values.std(axis=1)
+                    ax.plot(relative_hours, mean_vals, color=sides[name]["color"])
+                    ax.fill_between(relative_hours, mean_vals - std_vals, mean_vals + std_vals,
+                                     color=sides[name]["color"], alpha=0.25, linewidth=0)
+                    ax.set_ylabel(f"{group_label} (avg±std, n={len(member_cols)})", fontsize=9)
+                else:
+                    ax.plot(relative_hours, averaged[member_cols[0]], color=sides[name]["color"])
+                    ax.set_ylabel(member_cols[0], fontsize=9)
                 ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
-                ax.set_ylabel(col, fontsize=9)
                 ax.tick_params(labelsize=8)
                 ax.grid(alpha=0.3)
+                label_axes[group_label] = ax
             axes[-1].set_xlabel("Hours relative to each neighbor's own timestamp", fontsize=8)
-            axes[0].set_title(f"[{label}] {n_included} neighbor(s), window ±{window_hours:.2f} h", fontsize=9)
+            axes[0].set_title(f"{n_included} neighbor(s), window ±{window_hours:.2f} h", fontsize=9)
+        sides[name]["label_axes"] = label_axes
+
+    def apply_y_sync():
+        # Only "activity" and any co2 group/column are linked -- rel_humid/Tamb keep their own
+        # independent scale, since the ask was specifically to make activity and co2 directly
+        # comparable between the left and right panels, not every trace.
+        if not sync_y:
+            return
+        left_axes = sides["left"].get("label_axes", {})
+        right_axes = sides["right"].get("label_axes", {})
+        for group_label in set(left_axes) & set(right_axes):
+            if group_label != "activity" and not group_label.lower().startswith("co2"):
+                continue
+            ax_l, ax_r = left_axes[group_label], right_axes[group_label]
+            ymin = min(ax_l.get_ylim()[0], ax_r.get_ylim()[0])
+            ymax = max(ax_l.get_ylim()[1], ax_r.get_ylim()[1])
+            ax_l.set_ylim(ymin, ymax)
+            ax_r.set_ylim(ymin, ymax)
+
+    def refresh_both_sides():
+        # Re-run whichever side(s) already have a point selected, so a control change (k,
+        # CO2 display mode, y-sync) is immediately visible instead of only taking effect on the
+        # next click.
+        if last_click["left"] is not None:
+            update_side("left", last_click["left"], highlight_left, "left-click")
+        if last_click["right"] is not None:
+            update_side("right", last_click["right"], highlight_right, "right-click")
+        apply_y_sync()
+        fig.tight_layout()
+        fig.canvas.draw_idle()
 
     def on_click(event):
         if event.inaxes is not ax_map:
@@ -205,6 +287,7 @@ def main():
         else:
             return
 
+        apply_y_sync()
         # The trace panels are (re)created here, after the one-time layout pass at startup, so
         # their y-axis labels are never accounted for by it -- without redoing the layout now,
         # those labels can render past the edge of their column and overlap ax_map.
@@ -214,34 +297,56 @@ def main():
     def on_k_changed(val):
         nonlocal current_k
         current_k = int(val)
-        # Re-run whichever side(s) already have a point selected, so the change is immediately
-        # visible instead of only taking effect on the next click.
-        if last_click["left"] is not None:
-            update_side("left", last_click["left"], highlight_left, "left-click")
-        if last_click["right"] is not None:
-            update_side("right", last_click["right"], highlight_right, "right-click")
-        fig.tight_layout()
-        fig.canvas.draw_idle()
+        refresh_both_sides()
+
+    def on_co2_mode_changed(selected_label):
+        nonlocal co2_mode
+        co2_mode = "averaged" if selected_label.startswith("avg") else "individual"
+        refresh_both_sides()
+
+    def on_sync_changed(_selected_label):
+        nonlocal sync_y
+        sync_y = not sync_y
+        refresh_both_sides()
+
+    def row0_bbox_inches():
+        # Crop the saved figure to row 0 (map + trace columns) only, excluding row 1's control
+        # strip below it. The boundary is fixed by the gridspec's own height_ratios/hspace, not
+        # by content, so this reads it straight from the gridspec rather than needing a renderer
+        # or backend-specific tight-bbox machinery. Cropping exactly at row 0's cell-bottom cuts
+        # into its own x-tick labels/xlabel (they render into the hspace gap below the cell, not
+        # strictly inside it); cropping at row 1's cell-top catches the "CO2 display" title
+        # spilling above *its* cell for the same reason. The midpoint of that gap clears both.
+        bottoms, tops, _lefts, _rights = outer_gs.get_grid_positions(fig)
+        crop_y = (bottoms[0] + tops[1]) / 2
+        width_in, height_in = fig.get_size_inches()
+        return Bbox.from_extents(0, crop_y * height_in, width_in, height_in)
 
     def on_save_clicked(event):
-        # A fresh, hidden root per click: simplest way to get a native save-file dialog without
-        # keeping a whole second Tk mainloop running alongside whatever backend matplotlib is using.
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.asksaveasfilename(
-            title="Save current view as...",
-            defaultextension=".png",
-            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"), ("All files", "*.*")],
-        )
-        root.destroy()
-        if not path:
-            return  # user cancelled
-        fig.savefig(path, dpi=150)
+        # No file dialog: the installed matplotlib's native macOS save panel
+        # (NavigationToolbar2Mac -> _macosx.choose_save_file) takes only a title and a bare
+        # filename, no directory, and Cocoa's fallback when none is set is whatever it last
+        # remembers -- not something this app can point at --figures-dir. Saving straight there
+        # with an auto-generated name sidesteps that entirely (and avoids tkinter, which is what
+        # previously made the button unresponsive and crashed the app on close).
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        path = figures_dir / f"{project_dir.name}_k{current_k}_{datetime.now():%Y%m%d_%H%M%S}.png"
+        fig.savefig(path, dpi=150, bbox_inches=row0_bbox_inches())
         print(f"\nSaved current view to {path}")
 
     save_button = Button(ax_save_button, "Save image")
     save_button.on_clicked(on_save_clicked)
+
+    # Default (index 0) matches co2_mode = "averaged" above.
+    co2_mode_radio = RadioButtons(ax_co2_mode, ["avg ± std", "per sensor"], active=0)
+    for radio_label in co2_mode_radio.labels:
+        radio_label.set_fontsize(8)
+    co2_mode_radio.on_clicked(on_co2_mode_changed)
+
+    sync_check = CheckButtons(ax_sync_check, ["Sync Y (L/R)"], [sync_y])
+    for check_label in sync_check.labels:
+        check_label.set_fontsize(8)
+    sync_check.on_clicked(on_sync_changed)
 
     fig.canvas.mpl_connect("button_press_event", on_click)
     k_slider.on_changed(on_k_changed)
@@ -252,9 +357,9 @@ def main():
     # here for real interactive backends, which incidentally keeps main()'s locals alive for the
     # whole session, but that's not something to rely on -- attaching to the figure is the robust
     # fix matplotlib's own docs recommend.
-    fig._umap_inspector_widgets = (k_slider, save_button)
+    fig._umap_inspector_widgets = (k_slider, save_button, co2_mode_radio, sync_check)
 
-    plt.tight_layout()
+    fig.tight_layout()
     plt.show()
 
 
