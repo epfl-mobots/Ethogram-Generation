@@ -87,10 +87,14 @@ def findPointDensity(zValues, sigma, numPoints, rangeVals):
 
 
 def randomizewshed(wshed):
+    # Background pixels are 0 and stay 0 here (outwshed starts all-zero, only wshed==wreg
+    # pixels get touched below), which gencmap() renders as pure white (colors[0] = (1,1,1)).
+    # Regions are enumerated starting at 1, not 0, so no actual region can land on that same
+    # value and be rendered indistinguishable from the white background.
     outwshed = np.zeros_like(wshed)
     regs = np.unique(wshed)[1:]
     np.random.shuffle(regs)
-    for i, wreg in enumerate(regs):
+    for i, wreg in enumerate(regs, start=1):
         outwshed[wshed==wreg] = i
     return outwshed
 
